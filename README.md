@@ -1,1 +1,1 @@
-This build includes a CORS fallback for Yahoo API using r.jina.ai proxy. Replace index.html with the full version if needed.
+Deploy via GitHub Pages. Append ?diag=1 for diagnostics.
