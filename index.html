@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Overbought/Oversold Dashboard — Alpha Vantage</title>
+<title>Overbought/Oversold Dashboard — Alpha Vantage (Patched)</title>
 <style>
   :root{
     --bg:#0f1115; --card:#171923; --muted:#8a94a6; --text:#e6e9ef; --accent:#66c3ff;
@@ -35,13 +35,14 @@
   .chiplist{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
   .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:18px;background:#1b2231;color:#cbd3e1;border:1px solid #2b3346;padding:10px 14px;border-radius:10px;display:none}
   .toast.on{display:block}
+  .loading{color:#9aa3b2;font-style:italic}
 </style>
 </head>
 <body>
 <header>
   <div class="wrap">
     <h1>Market Overbought/Oversold Dashboard — Alpha Vantage</h1>
-    <div class="sub">Uses Alpha Vantage for prices. Computes RSI, %K, Williams %R, %B, and distance from 200‑DMA. <span id="lastUpdated"></span></div>
+    <div class="sub">Alpha Vantage prices with resilient rate‑limit handling. <span id="lastUpdated"></span></div>
     <div class="controls">
       <button id="refreshBtn" class="btn">Refresh Now <span id="loader" style="display:none">⏳</span></button>
       <label class="hint">Auto-refresh
@@ -55,6 +56,13 @@
       <span class="hint">API Key:</span>
       <input id="apiKey" placeholder="Alpha Vantage API key" style="min-width:280px" />
       <button id="saveKey" class="btn">Save Key</button>
+      <label class="hint">Throttle (sec)
+        <select id="throttleSel">
+          <option value="20">20</option><option value="15">15</option><option value="10">10</option><option value="5">5 (premium)</option>
+        </select>
+      </label>
+      <button id="testBtn" class="btn">Test API (SPY)</button>
+      <button id="loadAllBtn" class="btn">Load All Defaults</button>
     </div>
 
     <div class="chiplist" id="universeChips"></div>
@@ -83,12 +91,22 @@
 <div id="toast" class="toast"></div>
 
 <footer class="wrap" style="color:#8a94a6;font-size:12px;margin-bottom:40px">
-  Data source: Alpha Vantage. Indicators computed client‑side. Informational only.
+  Data: Alpha Vantage. Indicators computed client‑side. Informational only.
 </footer>
 
 <script>
 (() => {
-  const DEFAULT_UNIVERSE = [
+  // Small default set to stay within free-tier limits on first load
+  const DEFAULT_UNIVERSE_SMALL = [
+    {name:"US Stock – S&P 500", sym:"SPY"},
+    {name:"US Stock – Nasdaq 100", sym:"QQQ"},
+    {name:"US Bonds – Long Treasuries", sym:"TLT"},
+    {name:"Gold (proxy GLD)", sym:"GLD"},
+    {name:"Bitcoin", sym:"BTC-USD"},
+    {name:"Ethereum", sym:"ETH-USD"}
+  ];
+  // Full set you can opt into after success
+  const DEFAULT_UNIVERSE_FULL = [
     {name:"US Stock – S&P 500", sym:"SPY"},
     {name:"US Stock – Nasdaq 100", sym:"QQQ"},
     {name:"US Total Market", sym:"VTI"},
@@ -109,9 +127,10 @@
     {name:"Wheat (proxy WEAT)", sym:"WEAT"}
   ];
 
-  const STORAGE_KEY_UNIVERSE = "market_oo_universe_alpha_v1";
+  const STORAGE_KEY_UNIVERSE = "market_oo_universe_alpha_v2";
   const STORAGE_KEY_KEY = "market_oo_alpha_key";
   const STORAGE_KEY_AUTO = "market_oo_auto_minutes";
+  const STORAGE_KEY_THROTTLE = "market_oo_alpha_throttle";
   const DEFAULT_KEY = "ORZ71V8Q99VAP1M6";
 
   const tbody = document.getElementById("tbody");
@@ -120,47 +139,75 @@
   const loader = document.getElementById("loader");
   const toast = document.getElementById("toast");
   const apiKeyInput = document.getElementById("apiKey");
-
-  function loadKey(){ const k = localStorage.getItem(STORAGE_KEY_KEY) || DEFAULT_KEY; apiKeyInput.value = k; return k; }
-  function saveKey(){ const k = apiKeyInput.value.trim(); if(k){ localStorage.setItem(STORAGE_KEY_KEY, k); showToast("API key saved."); } }
-  function loadUniverse(){ try{ const raw = localStorage.getItem(STORAGE_KEY_UNIVERSE); if(!raw) return DEFAULT_UNIVERSE.slice(); const parsed = JSON.parse(raw); if(!Array.isArray(parsed)||parsed.length===0) return DEFAULT_UNIVERSE.slice(); return parsed; }catch(e){ return DEFAULT_UNIVERSE.slice(); } }
-  function saveUniverse(u){ localStorage.setItem(STORAGE_KEY_UNIVERSE, JSON.stringify(u)); }
-  let UNIVERSE = loadUniverse();
+  const throttleSel = document.getElementById("throttleSel");
 
   function showToast(msg, ms=3000){ toast.textContent = msg; toast.classList.add("on"); setTimeout(()=> toast.classList.remove("on"), ms); }
 
-  const THROTTLE_MS = 15000;
-  let queue = Promise.resolve();
-  function schedule(task){
-    queue = queue.then(()=> task()).then(res=> new Promise(r=> setTimeout(()=> r(res), THROTTLE_MS)));
-    return queue;
+  function loadUniverse(){
+    try{
+      const raw = localStorage.getItem(STORAGE_KEY_UNIVERSE);
+      if(!raw) return DEFAULT_UNIVERSE_SMALL.slice();
+      const parsed = JSON.parse(raw);
+      if(!Array.isArray(parsed) || parsed.length === 0) return DEFAULT_UNIVERSE_SMALL.slice();
+      return parsed;
+    }catch(e){ return DEFAULT_UNIVERSE_SMALL.slice(); }
+  }
+  function saveUniverse(u){ localStorage.setItem(STORAGE_KEY_UNIVERSE, JSON.stringify(u)); }
+  let UNIVERSE = loadUniverse();
+
+  function renderChips(){
+    chips.innerHTML = "";
+    UNIVERSE.forEach((u, idx)=>{
+      const span = document.createElement("span");
+      span.className = "chip";
+      span.textContent = `${u.name || u.sym} • ${u.sym}`;
+      span.title = "Click to remove";
+      span.style.cursor = "pointer";
+      span.addEventListener("click", ()=>{ UNIVERSE.splice(idx,1); saveUniverse(UNIVERSE); refresh(); });
+      chips.appendChild(span);
+    });
   }
 
-  async function fetchAlphaEquityDaily(sym, key){
-    const url = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol=${encodeURIComponent(sym)}&outputsize=compact&apikey=${encodeURIComponent(key)}`;
-    return schedule(async ()=>{ const j = await fetchJSON(url); return parseEquityDaily(j); });
-  }
-  async function fetchAlphaCryptoDaily(cryptoSym, market, key){
-    const url = `https://www.alphavantage.co/query?function=DIGITAL_CURRENCY_DAILY&symbol=${encodeURIComponent(cryptoSym)}&market=${encodeURIComponent(market)}&apikey=${encodeURIComponent(key)}`;
-    return schedule(async ()=>{ const j = await fetchJSON(url); return parseCryptoDaily(j, market); });
-  }
+  function loadKey(){ const k = localStorage.getItem(STORAGE_KEY_KEY) || DEFAULT_KEY; apiKeyInput.value = k; return k; }
+  function saveKey(){ const k = apiKeyInput.value.trim(); if(k){ localStorage.setItem(STORAGE_KEY_KEY, k); showToast("API key saved."); } }
+  function loadThrottle(){ const t = localStorage.getItem(STORAGE_KEY_THROTTLE) || "20"; throttleSel.value = t; return parseInt(t,10); }
+  function saveThrottle(v){ localStorage.setItem(STORAGE_KEY_THROTTLE, String(v)); }
 
-  async function fetchJSON(url){
-    const res = await fetch(url, {cache:"no-store"});
-    const txt = await res.text();
-    if(res.status>=400) throw new Error(`HTTP ${res.status}`);
-    let j; try{ j = JSON.parse(txt); }catch(e){ throw new Error("JSON parse error"); }
-    if(j["Error Message"]) throw new Error("API error: " + j["Error Message"]);
-    if(j["Note"]){
-      showToast("Rate limit Note received. Pausing to retry…", 4000);
-      await new Promise(r=>setTimeout(r, THROTTLE_MS*2));
-      const res2 = await fetch(url, {cache:"no-store"});
-      const txt2 = await res2.text();
-      try{ j = JSON.parse(txt2); }catch(e){ throw new Error("JSON parse error"); }
-      if(j["Note"]) throw new Error("Rate limit persists. Try again later or raise your plan.");
+  // ---- Robust Alpha Vantage fetch with multi-retry Note handling ----
+  async function fetchJSONWithRetries(url, maxRetries=3, baseDelayMs=8000){
+    for(let attempt=0; attempt<=maxRetries; attempt++){
+      const res = await fetch(url, {cache:"no-store"});
+      const txt = await res.text();
+      let j;
+      try{ j = JSON.parse(txt); }catch(e){ throw new Error("JSON parse error"); }
+      if(j["Error Message"]) throw new Error("API error: " + j["Error Message"]);
+      if(!j["Note"]) return j; // success
+      if(attempt === maxRetries){
+        throw new Error("Rate limit 'Note' after retries");
+      }
+      const wait = baseDelayMs * Math.pow(2, attempt); // exp backoff
+      showToast(`Rate limit Note… retrying in ${Math.round(wait/1000)}s`, 1500);
+      await new Promise(r=> setTimeout(r, wait));
     }
-    return j;
+    throw new Error("Unreachable");
   }
+
+  async function fetchAlphaEquityDaily(sym, key, throttleMs){
+    const url = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol=${encodeURIComponent(sym)}&outputsize=compact&apikey=${encodeURIComponent(key)}`;
+    // throttle chaining
+    await wait(throttleMs);
+    const j = await fetchJSONWithRetries(url, 3, throttleMs/2);
+    return parseEquityDaily(j);
+  }
+
+  async function fetchAlphaCryptoDaily(cryptoSym, market, key, throttleMs){
+    const url = `https://www.alphavantage.co/query?function=DIGITAL_CURRENCY_DAILY&symbol=${encodeURIComponent(cryptoSym)}&market=${encodeURIComponent(market)}&apikey=${encodeURIComponent(key)}`;
+    await wait(throttleMs);
+    const j = await fetchJSONWithRetries(url, 3, throttleMs/2);
+    return parseCryptoDaily(j, market);
+  }
+
+  function wait(ms){ return new Promise(r=> setTimeout(r, ms)); }
 
   function parseEquityDaily(j){
     const root = j["Time Series (Daily)"];
@@ -178,7 +225,7 @@
     const dates = Object.keys(root).sort();
     const closeKey = `4a. close (${market})`;
     const highKey = `2a. high (${market})`;
-    const lowKey = `3a. low (${market})`;
+    const lowKey  = `3a. low (${market})`;
     const closes = dates.map(d=> Number(root[d][closeKey]));
     const highs  = dates.map(d=> Number(root[d][highKey]));
     const lows   = dates.map(d=> Number(root[d][lowKey]));
@@ -215,21 +262,10 @@
   function fmtPct(x,d=1){ return isFinite(x)?(x*100).toFixed(d)+"%":"—"; }
   function fmtNum(x,d=2){ return isFinite(x)?Number(x).toFixed(d):"—"; }
 
-  function renderChips(){
-    chips.innerHTML="";
-    UNIVERSE.forEach((u, idx)=>{
-      const span=document.createElement("span");
-      span.className="chip"; span.textContent=`${u.name||u.sym} • ${u.sym}`; span.title="Click to remove";
-      span.style.cursor="pointer";
-      span.addEventListener("click", ()=>{ UNIVERSE.splice(idx,1); saveUniverse(UNIVERSE); refresh(); });
-      chips.appendChild(span);
-    });
-  }
-
   function sparkline(canvas, series){
     const ctx=canvas.getContext("2d"); const w=canvas.width, h=canvas.height;
     ctx.clearRect(0,0,w,h);
-    if(!series || series.length<2) return;
+    if(!series || series.length<2) { ctx.fillStyle="#9aa3b2"; ctx.fillText("—", 4, 12); return; }
     const finite=series.filter(Number.isFinite), min=Math.min(...finite), max=Math.max(...finite);
     const pad=4, n=series.length;
     ctx.beginPath();
@@ -245,7 +281,7 @@
   function linkToAV(sym){ return `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol=${encodeURIComponent(sym)}&apikey=demo`; }
   function linkToCrypto(sym){ return `https://www.alphavantage.co/query?function=DIGITAL_CURRENCY_DAILY&symbol=${encodeURIComponent(sym)}&market=USD&apikey=demo`; }
 
-  async function rowForAsset(asset, key){
+  async function rowForAsset(asset, key, throttleMs){
     const tr=document.createElement("tr");
     const tds=new Array(11).fill(0).map(()=>document.createElement("td"));
     tds.forEach(td=> tr.appendChild(td));
@@ -255,10 +291,16 @@
     const link = isCrypto ? linkToCrypto(asset.sym.split("-")[0]) : linkToAV(asset.sym);
     tds[1].innerHTML = `<a href="${link}" target="_blank" rel="noopener noreferrer">${asset.sym}</a>`;
 
+    // show loading placeholders
+    tds[2].innerHTML = `<span class="loading">Loading…</span>`;
+    for(let i=3;i<=8;i++) tds[i].innerHTML = `<span class="loading">Loading…</span>`;
+    tds[9].innerHTML = `<span class="pill neutral">Loading</span>`;
+    tds[10].innerHTML = `<span class="loading">Loading…</span>`;
+
     try{
       let data;
-      if(isCrypto){ const base=asset.sym.split("-")[0].toUpperCase(); data = await fetchAlphaCryptoDaily(base, "USD", key); }
-      else{ data = await fetchAlphaEquityDaily(asset.sym.toUpperCase(), key); }
+      if(isCrypto){ const base=asset.sym.split("-")[0].toUpperCase(); data = await fetchAlphaCryptoDaily(base, "USD", key, throttleMs); }
+      else{ data = await fetchAlphaEquityDaily(asset.sym.toUpperCase(), key, throttleMs); }
       const {closes, highs, lows, price} = data;
 
       const rsiVal=rsi(closes,14);
@@ -279,26 +321,29 @@
       tds[9].innerHTML = `<span class="pill ${state.cls}">${state.label}</span>`;
 
       const spark=document.createElement("canvas"); spark.className="spark"; spark.width=300; spark.height=80;
-      tds[10].appendChild(spark);
+      tds[10].innerHTML=""; tds[10].appendChild(spark);
       const last252=closes.slice(-252);
       sparkline(spark, last252);
     }catch(e){
-      tds[2].textContent="—"; tds[3].textContent="—"; tds[4].textContent="—"; tds[5].textContent="—";
-      tds[6].textContent="—"; tds[7].textContent="—"; tds[8].textContent="—";
-      tds[9].innerHTML = `<span class="pill neutral" title="${String(e).replace(/"/g,'&quot;')}">No data</span>`;
-      tds[10].textContent="—";
+      const err = String(e);
+      for(let i=2;i<=8;i++) tds[i].innerHTML = "—";
+      tds[9].innerHTML = `<span class="pill neutral" title="${err.replace(/"/g,'&quot;')}">No data</span>`;
+      tds[10].innerHTML = "—";
     }
     return tr;
   }
 
   async function refresh(){
     const key = apiKeyInput.value.trim() || DEFAULT_KEY;
+    const throttleMs = parseInt(throttleSel.value,10)*1000;
     loader.style.display="inline-block";
     tbody.innerHTML="";
     renderChips();
+
+    // process sequentially to respect throttle + retries
     const rows=[];
     for(const u of UNIVERSE){
-      rows.push(await rowForAsset(u, key));
+      rows.push(await rowForAsset(u, key, throttleMs));
     }
     rows.sort((a,b)=>{
       const ax = parseFloat(a.children[8].textContent) || -Infinity;
@@ -348,7 +393,24 @@
     refresh();
   });
   document.getElementById("resetBtn").addEventListener("click", ()=>{
-    if(confirm("Restore default asset list?")){ UNIVERSE = DEFAULT_UNIVERSE.slice(); saveUniverse(UNIVERSE); refresh(); }
+    if(confirm("Restore default (small) list?")){ UNIVERSE = DEFAULT_UNIVERSE_SMALL.slice(); saveUniverse(UNIVERSE); refresh(); }
+  });
+  document.getElementById("saveKey").addEventListener("click", ()=>{ saveKey(); });
+  document.getElementById("testBtn").addEventListener("click", async ()=>{
+    const key = apiKeyInput.value.trim() || DEFAULT_KEY;
+    const throttleMs = parseInt(throttleSel.value,10)*1000;
+    showToast("Testing SPY fetch…");
+    try{
+      await fetchAlphaEquityDaily("SPY", key, 0); // no throttle for single test
+      showToast("SPY fetch OK — API key works!");
+    }catch(e){
+      showToast("SPY test failed: " + String(e));
+    }
+  });
+  document.getElementById("loadAllBtn").addEventListener("click", ()=>{
+    if(confirm("Load the full default universe? This may hit rate limits on free tier.")){
+      UNIVERSE = DEFAULT_UNIVERSE_FULL.slice(); saveUniverse(UNIVERSE); refresh();
+    }
   });
 
   const autoSel=document.getElementById("autoSel");
@@ -356,10 +418,12 @@
   if(savedAuto) autoSel.value=savedAuto;
   function setupTimer(){ const mins=parseInt(autoSel.value,10); if(window._timer) clearInterval(window._timer); if(mins>0) window._timer=setInterval(refresh, mins*60*1000); }
   autoSel.addEventListener("change", ()=>{ localStorage.setItem(STORAGE_KEY_AUTO, autoSel.value); setupTimer(); });
-  document.getElementById("saveKey").addEventListener("click", ()=>{ saveKey(); });
 
   // Init
-  loadKey(); UNIVERSE = loadUniverse(); renderChips(); setupTimer(); refresh();
+  apiKeyInput.value = localStorage.getItem(STORAGE_KEY_KEY) || DEFAULT_KEY;
+  throttleSel.value = localStorage.getItem(STORAGE_KEY_THROTTLE) || "20";
+  throttleSel.addEventListener("change", ()=>{ saveThrottle(throttleSel.value); });
+  renderChips(); setupTimer(); refresh();
 })();
 </script>
 </body>
