@@ -1,12 +1,366 @@
 <!DOCTYPE html>
-<html lang='en'>
-<head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>
-<title>Market Overbought/Oversold Dashboard (Patched)</title></head>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Overbought/Oversold Dashboard — Alpha Vantage</title>
+<style>
+  :root{
+    --bg:#0f1115; --card:#171923; --muted:#8a94a6; --text:#e6e9ef; --accent:#66c3ff;
+    --red:#ff6b6b; --green:#27d980; --chip:#212633; --chip-border:#2d3445;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;background:linear-gradient(180deg,#0e1014,#0f1115);color:var(--text)}
+  header{position:sticky;top:0;z-index:10;backdrop-filter:saturate(140%) blur(10px);background:rgba(15,17,21,.7);border-bottom:1px solid #1f2330}
+  .wrap{max-width:1200px;margin:0 auto;padding:16px 20px}
+  h1{font-size:20px;margin:0 0 6px} .sub{color:var(--muted);font-size:13px}
+  .controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:10px}
+  .btn{background:var(--chip);border:1px solid var(--chip-border);color:var(--text);padding:9px 12px;border-radius:9px;cursor:pointer;font-weight:600;font-size:14px}
+  .btn:hover{border-color:#3c4560}
+  input,select{background:#0f131d;color:var(--text);border:1px solid #2b3346;padding:10px 12px;border-radius:9px;outline:none;font-size:14px}
+  .hint{color:var(--muted);font-size:12px}
+  .pill{padding:6px 10px;border-radius:999px;font-weight:700;font-size:12px;display:inline-flex;gap:6px}
+  .pill.ob{background:rgba(255,107,107,.12);border:1px solid rgba(255,107,107,.3);color:#ffb3b3}
+  .pill.os{background:rgba(39,217,128,.12);border:1px solid rgba(39,217,128,.3);color:#a9f5cd}
+  .pill.neutral{background:rgba(255,207,92,.08);border:1px solid rgba(255,207,92,.25);color:#ffe3a4}
+  table{width:100%;border-collapse:separate;border-spacing:0 10px;margin:16px 0}
+  thead th{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.6px;text-align:left;padding:0 10px}
+  tbody td{background:var(--card);border-top:1px solid #232836;border-bottom:1px solid #232836;padding:12px 10px;vertical-align:middle}
+  tbody tr td:first-child{border-left:1px solid #232836;border-top-left-radius:12px;border-bottom-left-radius:12px}
+  tbody tr td:last-child{border-right:1px solid #232836;border-top-right-radius:12px;border-bottom-right-radius:12px}
+  .asset{display:flex;flex-direction:column;gap:4px}.asset .sym{font-weight:800}.asset .name{color:var(--muted);font-size:12px}
+  .num{font-variant-numeric:tabular-nums;white-space:nowrap}
+  canvas.spark{width:180px;height:48px}
+  .chip{background:var(--chip);border:1px solid var(--chip-border);padding:6px 9px;border-radius:999px;font-size:12px;font-weight:700;cursor:default}
+  .chiplist{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+  .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:18px;background:#1b2231;color:#cbd3e1;border:1px solid #2b3346;padding:10px 14px;border-radius:10px;display:none}
+  .toast.on{display:block}
+</style>
+</head>
 <body>
-<!-- Placeholder header; the full patched code is embedded below for brevity in this cell output -->
+<header>
+  <div class="wrap">
+    <h1>Market Overbought/Oversold Dashboard — Alpha Vantage</h1>
+    <div class="sub">Uses Alpha Vantage for prices. Computes RSI, %K, Williams %R, %B, and distance from 200‑DMA. <span id="lastUpdated"></span></div>
+    <div class="controls">
+      <button id="refreshBtn" class="btn">Refresh Now <span id="loader" style="display:none">⏳</span></button>
+      <label class="hint">Auto-refresh
+        <select id="autoSel">
+          <option value="0">Off</option><option value="5">Every 5 minutes</option>
+          <option value="10">Every 10 minutes</option><option value="30">Every 30 minutes</option>
+          <option value="60">Every 60 minutes</option>
+        </select>
+      </label>
+      <button id="exportBtn" class="btn">Export CSV</button>
+      <span class="hint">API Key:</span>
+      <input id="apiKey" placeholder="Alpha Vantage API key" style="min-width:280px" />
+      <button id="saveKey" class="btn">Save Key</button>
+    </div>
+
+    <div class="chiplist" id="universeChips"></div>
+
+    <div class="controls" style="margin-top:10px">
+      <input id="addSym" placeholder="Add symbol (e.g., SPY or BTC-USD)" />
+      <input id="addName" placeholder="Label (optional)" />
+      <button id="addBtn" class="btn">Add</button>
+      <button id="resetBtn" class="btn" title="Restore defaults">Reset to Defaults</button>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <table id="tbl">
+    <thead>
+      <tr>
+        <th>Asset</th><th>Ticker</th><th>Price</th><th>RSI(14)</th>
+        <th>Stoch %K(14)</th><th>Williams %R(14)</th><th>%B (20, 2σ)</th><th>Dist 200‑DMA</th><th>Score</th><th>State</th><th>Trend (1Y)</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+</main>
+
+<div id="toast" class="toast"></div>
+
+<footer class="wrap" style="color:#8a94a6;font-size:12px;margin-bottom:40px">
+  Data source: Alpha Vantage. Indicators computed client‑side. Informational only.
+</footer>
+
 <script>
-// Minimal verification that script executes
-console.log("Patched dashboard file loaded.");
+(() => {
+  const DEFAULT_UNIVERSE = [
+    {name:"US Stock – S&P 500", sym:"SPY"},
+    {name:"US Stock – Nasdaq 100", sym:"QQQ"},
+    {name:"US Total Market", sym:"VTI"},
+    {name:"US Bonds – Long Treasuries", sym:"TLT"},
+    {name:"US Bonds – Aggregate", sym:"BND"},
+    {name:"High Yield Bonds", sym:"JNK"},
+    {name:"Real Estate (US REITs)", sym:"VNQ"},
+    {name:"US Dollar Index (ETF)", sym:"UUP"},
+    {name:"Bitcoin", sym:"BTC-USD"},
+    {name:"Ethereum", sym:"ETH-USD"},
+    {name:"WTI Crude (proxy USO)", sym:"USO"},
+    {name:"Brent Crude (proxy BNO)", sym:"BNO"},
+    {name:"Gold (proxy GLD)", sym:"GLD"},
+    {name:"Silver (proxy SLV)", sym:"SLV"},
+    {name:"Copper (proxy CPER)", sym:"CPER"},
+    {name:"Natural Gas (proxy UNG)", sym:"UNG"},
+    {name:"Corn (proxy CORN)", sym:"CORN"},
+    {name:"Wheat (proxy WEAT)", sym:"WEAT"}
+  ];
+
+  const STORAGE_KEY_UNIVERSE = "market_oo_universe_alpha_v1";
+  const STORAGE_KEY_KEY = "market_oo_alpha_key";
+  const STORAGE_KEY_AUTO = "market_oo_auto_minutes";
+  const DEFAULT_KEY = "ORZ71V8Q99VAP1M6";
+
+  const tbody = document.getElementById("tbody");
+  const chips = document.getElementById("universeChips");
+  const lastUpdated = document.getElementById("lastUpdated");
+  const loader = document.getElementById("loader");
+  const toast = document.getElementById("toast");
+  const apiKeyInput = document.getElementById("apiKey");
+
+  function loadKey(){ const k = localStorage.getItem(STORAGE_KEY_KEY) || DEFAULT_KEY; apiKeyInput.value = k; return k; }
+  function saveKey(){ const k = apiKeyInput.value.trim(); if(k){ localStorage.setItem(STORAGE_KEY_KEY, k); showToast("API key saved."); } }
+  function loadUniverse(){ try{ const raw = localStorage.getItem(STORAGE_KEY_UNIVERSE); if(!raw) return DEFAULT_UNIVERSE.slice(); const parsed = JSON.parse(raw); if(!Array.isArray(parsed)||parsed.length===0) return DEFAULT_UNIVERSE.slice(); return parsed; }catch(e){ return DEFAULT_UNIVERSE.slice(); } }
+  function saveUniverse(u){ localStorage.setItem(STORAGE_KEY_UNIVERSE, JSON.stringify(u)); }
+  let UNIVERSE = loadUniverse();
+
+  function showToast(msg, ms=3000){ toast.textContent = msg; toast.classList.add("on"); setTimeout(()=> toast.classList.remove("on"), ms); }
+
+  const THROTTLE_MS = 15000;
+  let queue = Promise.resolve();
+  function schedule(task){
+    queue = queue.then(()=> task()).then(res=> new Promise(r=> setTimeout(()=> r(res), THROTTLE_MS)));
+    return queue;
+  }
+
+  async function fetchAlphaEquityDaily(sym, key){
+    const url = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol=${encodeURIComponent(sym)}&outputsize=compact&apikey=${encodeURIComponent(key)}`;
+    return schedule(async ()=>{ const j = await fetchJSON(url); return parseEquityDaily(j); });
+  }
+  async function fetchAlphaCryptoDaily(cryptoSym, market, key){
+    const url = `https://www.alphavantage.co/query?function=DIGITAL_CURRENCY_DAILY&symbol=${encodeURIComponent(cryptoSym)}&market=${encodeURIComponent(market)}&apikey=${encodeURIComponent(key)}`;
+    return schedule(async ()=>{ const j = await fetchJSON(url); return parseCryptoDaily(j, market); });
+  }
+
+  async function fetchJSON(url){
+    const res = await fetch(url, {cache:"no-store"});
+    const txt = await res.text();
+    if(res.status>=400) throw new Error(`HTTP ${res.status}`);
+    let j; try{ j = JSON.parse(txt); }catch(e){ throw new Error("JSON parse error"); }
+    if(j["Error Message"]) throw new Error("API error: " + j["Error Message"]);
+    if(j["Note"]){
+      showToast("Rate limit Note received. Pausing to retry…", 4000);
+      await new Promise(r=>setTimeout(r, THROTTLE_MS*2));
+      const res2 = await fetch(url, {cache:"no-store"});
+      const txt2 = await res2.text();
+      try{ j = JSON.parse(txt2); }catch(e){ throw new Error("JSON parse error"); }
+      if(j["Note"]) throw new Error("Rate limit persists. Try again later or raise your plan.");
+    }
+    return j;
+  }
+
+  function parseEquityDaily(j){
+    const root = j["Time Series (Daily)"];
+    if(!root) throw new Error("No daily data");
+    const dates = Object.keys(root).sort();
+    const closes = dates.map(d=> Number(root[d]["5. adjusted close"] || root[d]["4. close"]));
+    const highs  = dates.map(d=> Number(root[d]["2. high"]));
+    const lows   = dates.map(d=> Number(root[d]["3. low"]));
+    const price  = closes[closes.length-1];
+    return {closes, highs, lows, price};
+  }
+  function parseCryptoDaily(j, market){
+    const root = j["Time Series (Digital Currency Daily)"];
+    if(!root) throw new Error("No crypto daily data");
+    const dates = Object.keys(root).sort();
+    const closeKey = `4a. close (${market})`;
+    const highKey = `2a. high (${market})`;
+    const lowKey = `3a. low (${market})`;
+    const closes = dates.map(d=> Number(root[d][closeKey]));
+    const highs  = dates.map(d=> Number(root[d][highKey]));
+    const lows   = dates.map(d=> Number(root[d][lowKey]));
+    const price  = closes[closes.length-1];
+    return {closes, highs, lows, price};
+  }
+
+  function sma(arr, p){ if(arr.length<p) return NaN; let s=0; for(let i=arr.length-p;i<arr.length;i++) s+=arr[i]; return s/p; }
+  function stddev(arr,p){ if(arr.length<p) return NaN; const m=sma(arr,p); let s=0; for(let i=arr.length-p;i<arr.length;i++){ const d=arr[i]-m; s+=d*d; } return Math.sqrt(s/p); }
+  function rsi(closes, p=14){
+    if(closes.length<=p) return NaN;
+    let gains=0,losses=0;
+    for(let i=1;i<=p;i++){ const d=closes[i]-closes[i-1]; if(d>=0) gains+=d; else losses-=d; }
+    let ag=gains/p, al=losses/p;
+    for(let i=p+1;i<closes.length;i++){ const d=closes[i]-closes[i-1]; const g=Math.max(d,0), l=Math.max(-d,0); ag=(ag*(p-1)+g)/p; al=(al*(p-1)+l)/p; }
+    if(al===0) return 100; const rs=ag/al; return 100-(100/(1+rs));
+  }
+  function rollingHigh(a,p){ if(a.length<p) return NaN; let h=-Infinity; for(let i=a.length-p;i<a.length;i++) if(a[i]>h) h=a[i]; return h; }
+  function rollingLow(a,p){ if(a.length<p) return NaN; let l=Infinity; for(let i=a.length-p;i<a.length;i++) if(a[i]<l) l=a[i]; return l; }
+  function stochasticK(h,l,c,k=14){ if(h.length<k||l.length<k||c.length<k) return NaN; const hh=rollingHigh(h,k), ll=rollingLow(l,k); return (c[c.length-1]-ll)/(hh-ll)*100; }
+  function williamsR(h,l,c,p=14){ if(h.length<p||l.length<p||c.length<p) return NaN; const hh=rollingHigh(h,p), ll=rollingLow(l,p); return -100*(hh-c[c.length-1])/(hh-ll); }
+  function percentB(c,p=20,m=2){ if(c.length<p) return NaN; const mean=sma(c,p), sd=stddev(c,p); if(!isFinite(mean)||!isFinite(sd)||sd===0) return NaN; const up=mean+m*sd, lo=mean-m*sd, last=c[c.length-1]; return (last-lo)/(up-lo); }
+  function distanceFromSMA(c,p=200){ if(c.length<p) return NaN; const mean=sma(c,p); const last=c[c.length-1]; return (last/mean)-1; }
+  function compositeScore({rsiVal, stochKVal, willRVal, pctBVal, dist200Val}){
+    let s=0;
+    if(isFinite(rsiVal)) s += (rsiVal>70)?1 : (rsiVal<30)?-1:0;
+    if(isFinite(stochKVal)) s += (stochKVal>80)?1 : (stochKVal<20)?-1:0;
+    if(isFinite(willRVal)) s += (willRVal>-20)?1 : (willRVal<-80)?-1:0;
+    if(isFinite(pctBVal)) s += (pctBVal>1)?1 : (pctBVal<0)?-1:0;
+    if(isFinite(dist200Val)) s += (dist200Val>0.10)?1 : (dist200Val<-0.10)?-1:0;
+    return s;
+  }
+  function stateFromScore(s){ if(s>=3) return {label:"Overbought", cls:"ob"}; if(s<=-3) return {label:"Oversold", cls:"os"}; return {label:"Neutral", cls:"neutral"}; }
+  function fmtPct(x,d=1){ return isFinite(x)?(x*100).toFixed(d)+"%":"—"; }
+  function fmtNum(x,d=2){ return isFinite(x)?Number(x).toFixed(d):"—"; }
+
+  function renderChips(){
+    chips.innerHTML="";
+    UNIVERSE.forEach((u, idx)=>{
+      const span=document.createElement("span");
+      span.className="chip"; span.textContent=`${u.name||u.sym} • ${u.sym}`; span.title="Click to remove";
+      span.style.cursor="pointer";
+      span.addEventListener("click", ()=>{ UNIVERSE.splice(idx,1); saveUniverse(UNIVERSE); refresh(); });
+      chips.appendChild(span);
+    });
+  }
+
+  function sparkline(canvas, series){
+    const ctx=canvas.getContext("2d"); const w=canvas.width, h=canvas.height;
+    ctx.clearRect(0,0,w,h);
+    if(!series || series.length<2) return;
+    const finite=series.filter(Number.isFinite), min=Math.min(...finite), max=Math.max(...finite);
+    const pad=4, n=series.length;
+    ctx.beginPath();
+    for(let i=0;i<n;i++){
+      const v=series[i]; if(!isFinite(v)) continue;
+      const x=pad+(w-2*pad)*(i/(n-1));
+      const y=pad+(h-2*pad)*(1-(v-min)/(max-min));
+      if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+    }
+    ctx.lineWidth=1.7; ctx.strokeStyle="#66c3ff"; ctx.stroke();
+  }
+
+  function linkToAV(sym){ return `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol=${encodeURIComponent(sym)}&apikey=demo`; }
+  function linkToCrypto(sym){ return `https://www.alphavantage.co/query?function=DIGITAL_CURRENCY_DAILY&symbol=${encodeURIComponent(sym)}&market=USD&apikey=demo`; }
+
+  async function rowForAsset(asset, key){
+    const tr=document.createElement("tr");
+    const tds=new Array(11).fill(0).map(()=>document.createElement("td"));
+    tds.forEach(td=> tr.appendChild(td));
+    tds[0].innerHTML = `<div class="asset"><div class="sym">${asset.sym}</div><div class="name">${asset.name||""}</div></div>`;
+
+    const isCrypto=/-USD$/i.test(asset.sym);
+    const link = isCrypto ? linkToCrypto(asset.sym.split("-")[0]) : linkToAV(asset.sym);
+    tds[1].innerHTML = `<a href="${link}" target="_blank" rel="noopener noreferrer">${asset.sym}</a>`;
+
+    try{
+      let data;
+      if(isCrypto){ const base=asset.sym.split("-")[0].toUpperCase(); data = await fetchAlphaCryptoDaily(base, "USD", key); }
+      else{ data = await fetchAlphaEquityDaily(asset.sym.toUpperCase(), key); }
+      const {closes, highs, lows, price} = data;
+
+      const rsiVal=rsi(closes,14);
+      const stochKVal=stochasticK(highs, lows, closes, 14);
+      const willRVal=williamsR(highs, lows, closes, 14);
+      const pctBVal=percentB(closes, 20, 2);
+      const dist200Val=distanceFromSMA(closes, 200);
+      const score=compositeScore({rsiVal, stochKVal, willRVal, pctBVal, dist200Val});
+      const state=stateFromScore(score);
+
+      tds[2].innerHTML = `<span class="num">${fmtNum(price)}</span>`;
+      tds[3].innerHTML = `<span class="num ${rsiVal>=70?'pos':''} ${rsiVal<=30?'neg':''}">${fmtNum(rsiVal)}</span>`;
+      tds[4].innerHTML = `<span class="num ${stochKVal>=80?'pos':''} ${stochKVal<=20?'neg':''}">${fmtNum(stochKVal)}</span>`;
+      tds[5].innerHTML = `<span class="num ${willRVal>-20?'pos':''} ${willRVal<-80?'neg':''}">${fmtNum(willRVal)}</span>`;
+      tds[6].innerHTML = `<span class="num ${pctBVal>1?'pos':''} ${pctBVal<0?'neg':''}">${fmtNum(pctBVal,2)}</span>`;
+      tds[7].innerHTML = `<span class="num ${dist200Val>0.10?'pos':''} ${dist200Val<-0.10?'neg':''}">${fmtPct(dist200Val,1)}</span>`;
+      tds[8].innerHTML = `<b class="num">${score}</b>`;
+      tds[9].innerHTML = `<span class="pill ${state.cls}">${state.label}</span>`;
+
+      const spark=document.createElement("canvas"); spark.className="spark"; spark.width=300; spark.height=80;
+      tds[10].appendChild(spark);
+      const last252=closes.slice(-252);
+      sparkline(spark, last252);
+    }catch(e){
+      tds[2].textContent="—"; tds[3].textContent="—"; tds[4].textContent="—"; tds[5].textContent="—";
+      tds[6].textContent="—"; tds[7].textContent="—"; tds[8].textContent="—";
+      tds[9].innerHTML = `<span class="pill neutral" title="${String(e).replace(/"/g,'&quot;')}">No data</span>`;
+      tds[10].textContent="—";
+    }
+    return tr;
+  }
+
+  async function refresh(){
+    const key = apiKeyInput.value.trim() || DEFAULT_KEY;
+    loader.style.display="inline-block";
+    tbody.innerHTML="";
+    renderChips();
+    const rows=[];
+    for(const u of UNIVERSE){
+      rows.push(await rowForAsset(u, key));
+    }
+    rows.sort((a,b)=>{
+      const ax = parseFloat(a.children[8].textContent) || -Infinity;
+      const bx = parseFloat(b.children[8].textContent) || -Infinity;
+      return (isNaN(bx)?-999:bx) - (isNaN(ax)?-999:ax);
+    });
+    rows.forEach(r=> tbody.appendChild(r));
+    lastUpdated.textContent = "• Last updated " + new Date().toLocaleString();
+    loader.style.display="none";
+  }
+
+  function exportCSV(){
+    const headers=["Asset","Ticker","Price","RSI(14)","Stoch%K(14)","Williams%R(14)","%B(20,2σ)","Dist200DMA","Score","State"];
+    const lines=[headers.join(",")];
+    [...tbody.children].forEach(tr=>{
+      const tds=[...tr.children];
+      const asset=tds[0].querySelector(".name")?.textContent||"";
+      const sym=tds[1].innerText.trim();
+      const price=tds[2].innerText.trim();
+      const rsi=tds[3].innerText.trim();
+      const stoch=tds[4].innerText.trim();
+      const willr=tds[5].innerText.trim();
+      const pb=tds[6].innerText.trim();
+      const dist=tds[7].innerText.trim();
+      const score=tds[8].innerText.trim();
+      const state=tds[9].innerText.trim();
+      const row=[asset,sym,price,rsi,stoch,willr,pb,dist,score,state].map(safe);
+      lines.push(row.join(","));
+    });
+    const blob=new Blob([lines.join("\n")],{type:"text/csv"});
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(blob);
+    a.download="market_overbought_oversold_alpha.csv";
+    document.body.appendChild(a); a.click(); a.remove();
+  }
+  function safe(s){ if(s==null) return ""; s=String(s); if(s.includes(",")||s.includes('"')) return '"'+s.replace(/"/g,'""')+'"'; return s; }
+
+  document.getElementById("refreshBtn").addEventListener("click", refresh);
+  document.getElementById("exportBtn").addEventListener("click", exportCSV);
+  document.getElementById("addBtn").addEventListener("click", ()=>{
+    const sym=document.getElementById("addSym").value.trim();
+    const name=document.getElementById("addName").value.trim();
+    if(!sym) return;
+    if(UNIVERSE.some(u=>u.sym.toUpperCase()===sym.toUpperCase())){ alert("That symbol is already in the list."); return; }
+    UNIVERSE.push({name:name||sym, sym}); saveUniverse(UNIVERSE);
+    document.getElementById("addSym").value=""; document.getElementById("addName").value="";
+    refresh();
+  });
+  document.getElementById("resetBtn").addEventListener("click", ()=>{
+    if(confirm("Restore default asset list?")){ UNIVERSE = DEFAULT_UNIVERSE.slice(); saveUniverse(UNIVERSE); refresh(); }
+  });
+
+  const autoSel=document.getElementById("autoSel");
+  const savedAuto=localStorage.getItem(STORAGE_KEY_AUTO);
+  if(savedAuto) autoSel.value=savedAuto;
+  function setupTimer(){ const mins=parseInt(autoSel.value,10); if(window._timer) clearInterval(window._timer); if(mins>0) window._timer=setInterval(refresh, mins*60*1000); }
+  autoSel.addEventListener("change", ()=>{ localStorage.setItem(STORAGE_KEY_AUTO, autoSel.value); setupTimer(); });
+  document.getElementById("saveKey").addEventListener("click", ()=>{ saveKey(); });
+
+  // Init
+  loadKey(); UNIVERSE = loadUniverse(); renderChips(); setupTimer(); refresh();
+})();
 </script>
 </body>
 </html>
